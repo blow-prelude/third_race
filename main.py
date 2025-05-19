@@ -1,7 +1,7 @@
 import sys
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,QWidget, QLabel,QTextEdit,QSizePolicy
-from PyQt5.QtCore import Qt,QThread, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import Qt,QThread, pyqtSignal, pyqtSlot, QMutex
 from PyQt5.QtGui import QImage, QPixmap
 
 import numpy as np
@@ -23,10 +23,15 @@ from typing import List, Tuple
 class CameraThread(QThread):
 
     # 定义一个信号，用来把处理完的 numpy.ndarray 帧发给主线程
-    frame_ready = pyqtSignal(np.ndarray)
+    frame_ready = pyqtSignal(QImage)
 
     def __init__(self,parent=None):
         super().__init__(parent)
+
+        # 用于控制线程循环
+        self._running = True
+        
+        self._lock = QMutex()
 
          # 9个方格的中心点坐标     
         self.square_centers: List[Tuple[np.ndarray, int]] = []
@@ -48,15 +53,17 @@ class CameraThread(QThread):
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G')) 
         if not self.cap.isOpened():
             print('Cannot open camera!')
-        # 用于控制线程循环
-        self._running = True
+        
 
 
     def stop(self):
         """外部调用，用来停止循环"""
+        self._lock.lock()
         self._running = False
+        self._lock.unlock()
 
 
+    '''
     # 视频处理主函数
     # 主循环：不断读帧并处理
     def run(self):
@@ -85,10 +92,11 @@ class CameraThread(QThread):
 
             # 3. 并行启动两个协程：盘外棋子检测 & 棋盘检测
             #    注意：detect_board 需要原始的 frame 用于可视化
-            tasks = [
-                self.detect_outside_chess(edges, left_edge, right_edge),
-                self.detect_board(edges, left_edge, right_edge, frame)
+            coroutines = [
+                self.detect_outside_chess(...),
+                self.detect_board(...)
             ]
+            tasks = [loop.create_task(coro) for coro in coroutines]
             done = loop.run_until_complete(asyncio.wait(tasks))[0]
 
             board_info = None
@@ -115,8 +123,43 @@ class CameraThread(QThread):
         self.cap.release()
         loop.close()
 
+    '''
+    def run(self):
+        while self._running:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("Failed to grab frame")
+                break
 
+            # 1. 预处理：灰度 + 闭操作 + Canny
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            kernels = np.ones((5,5), dtype=np.uint8)
+            closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernels, iterations=5)
+            edges = cv2.Canny(closed, config.CANNY_THRESH1, config.CANNY_THRESH2)
 
+            # 2. 计算左右边缘区域的 x 坐标
+            left_edge = int(frame.shape[1] * config.LEFT_EDGE_RATIO)
+            right_edge = int(frame.shape[1] * config.RIGHT_EDGE_RATIO)
+
+            # 同步执行棋盘和盘外棋子的检测
+            self.detect_outside_chess(edges, left_edge, right_edge)
+            board_info = self.detect_board(edges, left_edge, right_edge, frame)
+
+            # 4. 如果成功检测到棋盘，则检测棋盘上的棋子
+            if board_info is not None:
+                self.check_board(
+                    gray,
+                    board_info['square_centers'],
+                    board_info['square_radius']
+                )
+
+            # 转为 QImage 并发射
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+            self.frame_ready.emit(img)
+
+        self.cap.release()
 
 
     # 计算给定的2点之间的欧几里得距离
@@ -128,7 +171,7 @@ class CameraThread(QThread):
     # 识别盘外棋子
     # 在图像左右侧检测，如果外界矩形近似于正方形且边长在一定范围内,就认为检测到圆形
     # 然后根据左黑右白，分别把圆的中心点加入到列表中
-    async def detect_outside_chess(self,edges:np.ndarray, left_edge:int, right_edge:int) -> None:
+    def detect_outside_chess(self,edges:np.ndarray, left_edge:int, right_edge:int) -> None:
         mask = np.zeros_like(edges)
         # 中间区域全为0,左右边缘为255
         mask[: , :left_edge] = 255
@@ -158,7 +201,7 @@ class CameraThread(QThread):
 
     # 异步协程：检测棋盘（中间区域），找到最大的四边形轮廓，计算出棋盘参数并返回
     # 返回值是字典类型，分别是小方格中心坐标，小方格半径，棋盘4个角点
-    async def detect_board(self, edges: np.ndarray, left_edge: int, right_edge: int, frame: np.ndarray):
+    def detect_board(self, edges: np.ndarray, left_edge: int, right_edge: int, frame: np.ndarray):
         mask = np.zeros_like(edges)
         # 中间区域全为255,左右边缘为0
         mask[: , left_edge:right_edge] = 255
@@ -344,11 +387,27 @@ class MainWindow(QMainWindow):
         self.second_gamer_window = Gamer(self, "second_gamer")
 
 
+        # 启动摄像头线程并绑定信号 
+        self.camera_thread = CameraThread()
+        self.camera_thread.frame_ready.connect(self.first_gamer_window.update_image)
+        self.camera_thread.frame_ready.connect(self.second_gamer_window.update_image)
+        self.camera_thread.start()
+
+
 
     def switch_to_window(self, target_window):
         """切换到指定窗口"""
         target_window.show()
         self.hide()
+
+    def closeEvent(self, event):
+        """
+        关闭主窗口时，一定要先停止摄像头线程，再调用父类 closeEvent
+        """
+        if self.camera_thread is not None:
+            self.camera_thread.stop()
+            self.camera_thread.wait()
+        super().closeEvent(event)
 
 
 
@@ -569,24 +628,11 @@ class Gamer(BaseFunctionWindow):
         container.setLayout(content_layout)
         self.setCentralWidget(container)
 
-        # ———————— 5. 启动摄像头线程并绑定信号 ———————— #
-        self.camera_thread = CameraThread()
-        self.camera_thread.frame_ready.connect(self.update_image)
-        self.camera_thread.start()
+        
 
-    @pyqtSlot(np.ndarray)
-    def update_image(self, frame: np.ndarray):
-        """
-        接收 CameraWorker 发过来的 BGR 帧，转换成 QPixmap 然后设置到 video_label。
-        """
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        scaled = qt_image.scaled(
-            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.video_label.setPixmap(QPixmap.fromImage(scaled))
+    @pyqtSlot(QImage)
+    def update_image(self, img: QImage):
+        self.video_label.setPixmap(QPixmap.fromImage(img))
 
     def save_board(self):
         """
@@ -595,14 +641,15 @@ class Gamer(BaseFunctionWindow):
         # TODO: 在这里把当前棋盘状态保存到文件或数据库
         pass
 
+
+
     def closeEvent(self, event):
-        """
-        关闭窗口时，一定要先停止摄像头线程，再调用父类 closeEvent
-        """
-        self.camera_thread.stop()
-        self.camera_thread.wait()
+    # 拦截关闭事件，隐藏窗口而不是关闭
+    # self.hide()
+    # event.ignore()
         super().closeEvent(event)
 
+    
     
 
 
