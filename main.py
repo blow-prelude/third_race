@@ -1,11 +1,8 @@
 import sys
 
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QHBoxLayout,
-    QStackedWidget, QLabel, QGridLayout, QSizePolicy
-)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer,QRect
-from PyQt5.QtGui import QImage, QPixmap,QPainter, QPen, QBrush
+from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,QWidget, QLabel,QTextEdit,QSizePolicy
+from PyQt5.QtCore import Qt,QThread, pyqtSignal, pyqtSlot
+from PyQt5.QtGui import QImage, QPixmap
 
 import numpy as np
 import cv2
@@ -15,6 +12,7 @@ import sys
 import config
 
 # 开启多线程
+
 # from concurrent.futures import ThreadPoolExecutor
 import asyncio
 
@@ -22,9 +20,13 @@ import asyncio
 from typing import List, Tuple
 
 
-class CameraThread():
+class CameraThread(QThread):
 
-    def __init__(self):
+    # 定义一个信号，用来把处理完的 numpy.ndarray 帧发给主线程
+    frame_ready = pyqtSignal(np.ndarray)
+
+    def __init__(self,parent=None):
+        super().__init__(parent)
 
          # 9个方格的中心点坐标     
         self.square_centers: List[Tuple[np.ndarray, int]] = []
@@ -35,6 +37,9 @@ class CameraThread():
         # 场外黑白棋的位置
         self.outside_black_chess_location : List[List[float]]= []
         self.outside_white_chess_location : List[List[float]]= []
+
+
+        # 初始化串口
         
         # 初始化摄像头
         self.cap = cv2.VideoCapture(config.CameraConfig.INDEX)
@@ -43,6 +48,14 @@ class CameraThread():
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G')) 
         if not self.cap.isOpened():
             print('Cannot open camera!')
+        # 用于控制线程循环
+        self._running = True
+
+
+    def stop(self):
+        """外部调用，用来停止循环"""
+        self._running = False
+
 
     # 视频处理主函数
     # 主循环：不断读帧并处理
@@ -54,55 +67,55 @@ class CameraThread():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        try:
-            while True:
-                ret, frame = self.cap.read()
-                if not ret:
-                    print("Failed to grab frame")
-                    break
+        while self._running:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("Failed to grab frame")
+                break
 
-                # 1. 预处理：灰度 + 闭操作 + Canny
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                kernels = np.ones((5,5), dtype=np.uint8)
-                closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernels, iterations=5)
-                edges = cv2.Canny(closed, config.CANNY_THRESH1, config.CANNY_THRESH2)
+            # 1. 预处理：灰度 + 闭操作 + Canny
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            kernels = np.ones((5,5), dtype=np.uint8)
+            closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernels, iterations=5)
+            edges = cv2.Canny(closed, config.CANNY_THRESH1, config.CANNY_THRESH2)
 
-                # 2. 计算左右边缘区域的 x 坐标
-                left_edge = int(frame.shape[1] * config.LEFT_EDGE_RATIO)
-                right_edge = int(frame.shape[1] * config.RIGHT_EDGE_RATIO)
+            # 2. 计算左右边缘区域的 x 坐标
+            left_edge = int(frame.shape[1] * config.LEFT_EDGE_RATIO)
+            right_edge = int(frame.shape[1] * config.RIGHT_EDGE_RATIO)
 
-                # 3. 并行启动两个协程：盘外棋子检测 & 棋盘检测
-                #    注意：detect_board 需要原始的 frame 用于可视化
-                tasks = [
-                    self.detect_outside_chess(edges, left_edge, right_edge),
-                    self.detect_board(edges, left_edge, right_edge, frame)
-                ]
-                done, pending = loop.run_until_complete(asyncio.wait(tasks))
+            # 3. 并行启动两个协程：盘外棋子检测 & 棋盘检测
+            #    注意：detect_board 需要原始的 frame 用于可视化
+            tasks = [
+                self.detect_outside_chess(edges, left_edge, right_edge),
+                self.detect_board(edges, left_edge, right_edge, frame)
+            ]
+            done = loop.run_until_complete(asyncio.wait(tasks))[0]
 
-                board_info = None
-                for task in done:
-                    res = task.result()
-                    # detect_board 返回非 None 时就是它
-                    if isinstance(res, dict):
-                        board_info = res
+            board_info = None
+            for task in done:
+                res = task.result()
 
-                # 如果 detect_board 成功找到棋盘，调用 check_board
-                if board_info is not None:
-                    # 拿到灰度图，执行格子内棋子检测
-                    self.check_board(gray,
-                                     board_info['square_centers'],
-                                     board_info['square_radius'])
-                    # 把当前整张画面显示一下
-                cv2.imshow("board", frame)
+                if isinstance(res, dict):
+                    board_info = res
 
-                # 按 'q' 键退出循环
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+            # 如果 detect_board 成功找到棋盘，调用 check_board
+            if board_info is not None:
+                # 拿到灰度图，执行格子内棋子检测
+                self.check_board(gray,
+                                 board_info['square_centers'],
+                                 board_info['square_radius'])
 
-        finally:
-            self.cap.release()
-            cv2.destroyAllWindows()
-            loop.close()
+            # 处理结束后，不再用 cv2.imshow，而是通过信号把 frame 发给主线程
+            self.frame_ready.emit(frame.copy())
+
+            # 这个 sleep 可以稍微降低 CPU 占用（可选）
+            self.msleep(10)
+
+        # 循环结束后释放资源
+        self.cap.release()
+        loop.close()
+
+
 
 
 
@@ -266,229 +279,347 @@ class CameraThread():
        
 
 
-'''
-class Board(QWidget):
-    def __init__(self):
+
+# 3个子窗口的共性功能
+class BaseFunctionWindow(QMainWindow):
+    def __init__(self, main_window, title):
         super().__init__()
-        self.grid_size = 3
-        self.cell_size = 100
-        self.setFixedSize(self.grid_size * self.cell_size, self.grid_size * self.cell_size)
-        self.board = [['' for _ in range(self.grid_size)] for _ in range(self.grid_size)]
-        self.current_tool = None  # 'black' or 'white'
-
-    def set_tool(self, tool):
-        self.current_tool = tool
-
-    def reset_board(self):
-        self.board = [['' for _ in range(self.grid_size)] for _ in range(self.grid_size)]
-        self.update()
-
-    def mousePressEvent(self, event):
-        if self.current_tool not in ('black', 'white'):
-            return
-
-        x = event.x() // self.cell_size
-        y = event.y() // self.cell_size
-
-        if 0 <= x < self.grid_size and 0 <= y < self.grid_size:
-            self.board[y][x] = self.current_tool
-            self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-
-        # Draw grid
-        for i in range(1, self.grid_size):
-            painter.drawLine(0, i * self.cell_size, self.width(), i * self.cell_size)
-            painter.drawLine(i * self.cell_size, 0, i * self.cell_size, self.height())
-
-        # Draw symbols
-        for y in range(self.grid_size):
-            for x in range(self.grid_size):
-                cell = self.board[y][x]
-                center_x = x * self.cell_size + self.cell_size // 2
-                center_y = y * self.cell_size + self.cell_size // 2
-                half_size = self.cell_size // 3
-
-                if cell == 'black':
-                    painter.setBrush(QBrush(Qt.black))
-                    painter.setPen(Qt.NoPen)
-                    painter.drawEllipse(center_x - half_size, center_y - half_size,
-                                        2 * half_size, 2 * half_size)
-                elif cell == 'white':
-                    painter.setPen(QPen(Qt.black, 3))
-                    painter.drawLine(center_x - half_size, center_y - half_size,
-                                     center_x + half_size, center_y + half_size)
-                    painter.drawLine(center_x + half_size, center_y - half_size,
-                                     center_x - half_size, center_y + half_size)
-
-
-class DeployPage(QWidget):
-    def __init__(self, go_back_callback):
-        super().__init__()
-        self.current_mode = None  # 'black' or 'white'
-        self.buttons = {}
-
-        layout = QHBoxLayout()
-
-        # 左边是棋盘
-        self.board = Board()
-        layout.addWidget(self.board)
-
-        # 右边是按钮列
-        right_layout = QVBoxLayout()
-        right_layout.setAlignment(Qt.AlignTop)
-
-        # Back 按钮在右上角
-        back_btn = QPushButton("Back")
-        back_btn.clicked.connect(go_back_callback)
-        right_layout.addWidget(back_btn, alignment=Qt.AlignRight)
-
-        # 工具按钮（black, white, deploy, reset）
-        for label in ['black', 'white', 'deploy', 'reset']:
-            btn = QPushButton(label)
-            btn.setFixedHeight(50)
-            btn.clicked.connect(lambda _, l=label: self.handle_button(l))
-            btn.setCheckable(True)
-            self.buttons[label] = btn
-            right_layout.addWidget(btn)
-
-        layout.addLayout(right_layout)
-        self.setLayout(layout)
-
-    def handle_button(self, label):
-        # 清除所有按钮的“选中”状态（视觉变暗）
-        for btn in self.buttons.values():
-            btn.setChecked(False)
-            btn.setStyleSheet("")
-
-        if label in ['black', 'white']:
-            self.current_mode = label
-            self.board.set_tool(label)
-            self.buttons[label].setChecked(True)
-            self.buttons[label].setStyleSheet("background-color: lightgray;")
-        elif label in ['deploy', 'reset']:
-            self.current_mode = None
-            self.board.set_tool(None)
-            self.board.reset_board()
-
-
-
-class MainWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        # self.setWindowTitle("多页面 GUI 示例 - 扩展 Deploy")
+        self.main_window = main_window
+        self.setWindowTitle(title)
         self.resize(600, 400)
 
-        self.stack = QStackedWidget(self)
-        self.main_page = self.create_main_page()
-        self.deploy_page = DeployPage(go_back_callback=lambda: self.stack.setCurrentWidget(self.main_page))
+        # 返回按钮
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self.return_to_main_window)
+        self.back_button.setFixedSize(100,50)
 
-        self.stack.addWidget(self.main_page)
-        self.stack.addWidget(self.deploy_page)
+        # 将返回按钮设置在界面右侧
 
-        layout = QVBoxLayout()
-        layout.addWidget(self.stack)
-        self.setLayout(layout)
-
-    def create_main_page(self):
-        page = QWidget()
-        layout = QVBoxLayout()
-        layout.addStretch()
-
-        for label, callback in [
-            ("deploy", lambda: self.stack.setCurrentWidget(self.deploy_page)),
-            ("first_mover", lambda: print("TODO: 添加 first_mover 页面")),
-            ("second_mover", lambda: print("TODO: 添加 second_mover 页面"))
-        ]:
-            btn = QPushButton(label)
-            btn.setFixedHeight(80)
-            btn.clicked.connect(callback)
-            layout.addWidget(btn, alignment=Qt.AlignCenter)
-
-        layout.addStretch()
-        page.setLayout(layout)
-        return page
+    def return_to_main_window(self):
+        """返回主界面"""
+        self.main_window.show()
+        self.close()
 
 
-class MainWindow(QWidget):
+# 主窗口，中间竖直排列3个按钮，点击后进入不同的功能界面
+class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.init_ui()
-        self.init_camera()
+        self.initUI()
 
-    def init_ui(self):
-        self.setWindowTitle("Camera + GUI 异步示例")
-        self.resize(800, 600)
+    def initUI(self):
+        self.resize(600,400)
 
-        # 页面堆栈
-        self.stack = QStackedWidget()
-        self.main_page = self.create_main_page()
-        self.camera_page = self.create_camera_page()
+        # 在主界面竖直居中排列3个botton
 
-        self.stack.addWidget(self.main_page)
-        self.stack.addWidget(self.camera_page)
+        # 分别创建3个按钮
+        self.button1 = QPushButton("deploy", self)
+        self.button1.clicked.connect(lambda: self.switch_to_window(self.deploy_window))
+        self.button1.setFixedSize(100, 50)
+        # self.button1.setStyleSheet("background-color: white; color: black; font-size: 20px;")
 
+        self.button2 = QPushButton("first_gamer", self)
+        self.button2.clicked.connect(lambda: self.switch_to_window(self.first_gamer_window))
+        self.button2.setFixedSize(100, 50)
+
+        self.button3 = QPushButton("secong_gamer", self)
+        self.button3.clicked.connect(lambda: self.switch_to_window(self.second_gamer_window))
+        self.button3.setFixedSize(100, 50)
+
+        # 创建主界面布局
         layout = QVBoxLayout()
-        layout.addWidget(self.stack)
-        self.setLayout(layout)
+        layout.addWidget(self.button1)  
+        layout.addWidget(self.button2)
+        layout.addWidget(self.button3)
 
-    def create_main_page(self):
-        page = QWidget()
-        layout = QVBoxLayout()
-        btn = QPushButton("打开摄像头页面", self)
-        btn.clicked.connect(lambda: self.stack.setCurrentWidget(self.camera_page))
-        layout.addWidget(btn)
-        page.setLayout(layout)
-        return page
+        # 设置主界面布局
+        widget = QWidget()
+        widget.setLayout(layout)
+        self.setCentralWidget(widget)
 
-    def create_camera_page(self):
-        page = QWidget()
-        layout = QVBoxLayout()
 
-        # 摄像头显示区域
-        self.camera_label = QLabel()
-        self.camera_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.camera_label)
+        # 创建子界面
+        self.deploy_window = DeployPage(self, "delpoy")
+        self.first_gamer_window = Gamer(self, "first_gamer")
+        self.second_gamer_window = Gamer(self, "second_gamer")
 
-        # 返回按钮
-        back_btn = QPushButton("返回主页面")
-        back_btn.clicked.connect(lambda: self.stack.setCurrentWidget(self.main_page))
-        layout.addWidget(back_btn)
 
-        page.setLayout(layout)
-        return page
 
-    def init_camera(self):
-        # 创建摄像头线程
+    def switch_to_window(self, target_window):
+        """切换到指定窗口"""
+        target_window.show()
+        self.hide()
+
+
+
+# 自定义放置棋子界面
+class DeployPage(BaseFunctionWindow):
+    def __init__(self, main_window, lecture_title):
+        super().__init__(main_window, lecture_title)
+
+
+         # 当前选中落子模式： 0=none, 1=black, 2=white
+        self.current_mode = 0
+
+        # --------- 1. 左侧：3x3 格子区域 --------- #
+        # 使用一个 3x3 的 QPushButton 矩阵
+        self.grid_buttons: List[List[QPushButton]] = []
+        grid_widget = QWidget()
+        grid_layout = QVBoxLayout()  # 先垂直包一层，再在内部用 3 个横排布局
+        grid_layout.setSpacing(5)
+        grid_layout.setContentsMargins(5, 5, 5, 5)
+
+        for row in range(3):
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(5)
+            temp_row: List[QPushButton] = []
+            for col in range(3):
+                btn = QPushButton("")  # 初始文本为空
+                btn.setFixedSize(100, 100)
+                btn.setStyleSheet("font-size: 24px;")  # 字号稍大
+                btn.clicked.connect(self.make_cell_click_handler(row, col))
+                temp_row.append(btn)
+                row_layout.addWidget(btn)
+            self.grid_buttons.append(temp_row)
+            grid_layout.addLayout(row_layout)
+
+        grid_widget.setLayout(grid_layout)
+
+        # --------- 2. 右侧：功能按钮区域 --------- #
+        right_widget = QWidget()
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(10)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+
+        # 2.1 Black 按钮
+        self.black_button = QPushButton("Black")
+        self.black_button.setFixedSize(100, 40)
+        self.black_button.clicked.connect(self.on_black_clicked)
+        right_layout.addWidget(self.black_button, alignment=Qt.AlignTop)
+
+        # 2.2 White 按钮
+        self.white_button = QPushButton("White")
+        self.white_button.setFixedSize(100, 40)
+        self.white_button.clicked.connect(self.on_white_clicked)
+        right_layout.addWidget(self.white_button, alignment=Qt.AlignTop)
+
+        # 2.3 Deploy 按钮
+        self.deploy_button = QPushButton("Deploy")
+        self.deploy_button.setFixedSize(100, 40)
+        self.deploy_button.clicked.connect(self.on_deploy_clicked)
+        right_layout.addWidget(self.deploy_button, alignment=Qt.AlignTop)
+
+        # 2.4 Reset 按钮
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.setFixedSize(100, 40)
+        self.reset_button.clicked.connect(self.on_reset_clicked)
+        right_layout.addWidget(self.reset_button, alignment=Qt.AlignTop)
+
+        # 2.5 Back 按钮（继承自 BaseFunctionWindow）
+        #    BaseFunctionWindow 已经创建了 self.back_button 并连接 return_to_main_window()
+        self.back_button.setText("Back")
+        self.back_button.setFixedSize(100, 40)
+        right_layout.addWidget(self.back_button, alignment=Qt.AlignBottom)
+
+        # 把右侧布局设置到 right_widget
+        right_widget.setLayout(right_layout)
+
+        # --------- 3. 整体布局：左右并排 --------- #
+        main_layout = QHBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.addWidget(grid_widget, stretch=2)
+        main_layout.addWidget(right_widget, stretch=1)
+
+        central = QWidget()
+        central.setLayout(main_layout)
+        self.setCentralWidget(central)
+
+    def make_cell_click_handler(self, row: int, col: int):
+        """
+        返回一个槽函数引用，绑定到 grid_buttons[row][col] 的 clicked 信号上。
+        """
+        def handler():
+            if self.current_mode not in (1, 2):
+                # 没有选中 Black/White 模式时，点击不做任何事
+                return
+
+            btn = self.grid_buttons[row][col]
+            # # 如果该格子已经被标记，就不允许再重复标
+            # if btn.text() != "":
+            #     return
+
+            # 根据模式在按钮上标记 “1” 或 “2”
+            if self.current_mode == 1:
+                btn.setText("1")
+                btn.setEnabled(False)  # 禁止重复点击
+            elif self.current_mode == 2:
+                btn.setText("2")
+                btn.setEnabled(False)
+
+            # 标记完毕后，你也可以自动把 current_mode 置为 0，让用户每次都要重复按 Black/White
+            # 这取决于你的需求。若要保留模式，可注释下面一行：
+            # self.clear_mode_selection()
+
+        return handler
+
+    def on_black_clicked(self):
+        """
+        进入“黑棋落子”模式：按钮变暗，White 解暗
+        """
+        self.current_mode = 1
+        # 把 Black 字暗一点，White 恢复默认
+        self.black_button.setStyleSheet("background-color: lightgray;")
+        self.white_button.setStyleSheet("")
+
+    def on_white_clicked(self):
+        """
+        进入“白棋落子”模式：按钮变暗，Black 解暗
+        """
+        self.current_mode = 2
+        self.white_button.setStyleSheet("background-color: lightgray;")
+        self.black_button.setStyleSheet("")
+
+    def clear_mode_selection(self):
+        """
+        将 Black/White 的“暗色”恢复到默认，current_mode 置 0
+        """
+        self.current_mode = 0
+        self.black_button.setStyleSheet("")
+        self.white_button.setStyleSheet("")
+
+    def on_reset_clicked(self):
+        """
+        Reset：清空所有格子上的标记，并恢复 Black/White 按钮状态
+        """
+        for row in range(3):
+            for col in range(3):
+                btn = self.grid_buttons[row][col]
+                btn.setText("")
+                btn.setEnabled(True)
+        self.clear_mode_selection()
+
+    def on_deploy_clicked(self):
+        """
+        Deploy：目前仅清空所有格子上的标记（后续可加入串口发送逻辑）
+        """
+        # TODO: 串口发送逻辑放在这里
+        pass
+
+    # BaseFunctionWindow 已经把 return_to_main_window() 连接到 self.back_button
+    # 这里不需要 override closeEvent，除非你在 DeployPage 里有其他额外资源需要释放。
+
+
+
+
+# 人机对弈界面
+class Gamer(BaseFunctionWindow):
+    def __init__(self, main_window, lecture_title):
+        super().__init__(main_window, lecture_title)
+
+        # 界面左侧放一个 QLabel，用来显示视频帧 
+        self.video_label = QLabel()
+        # 给一个初始大小，后面可以根据需要调整
+        self.video_label.setFixedSize(240, 180)
+        self.video_label.setStyleSheet("background-color: black;")
+
+         # ———————— 2. 右侧：信息区（状态 + 作弊 + Save + Back） ———————— #
+
+        # 2.1 状态区：用一个只读的 QTextEdit 或 QLabel 也可以
+        self.status_area = QTextEdit()
+        self.status_area.setReadOnly(True)
+        self.status_area.setFixedHeight(80)
+        self.status_area.setPlaceholderText("Status: your turn / my turn / you win / you lose")
+        #（以后可以用 self.status_area.append("your turn") 之类更新）
+
+        # 2.2 作弊提示区：用 QLabel 即可
+        self.cheat_area = QLabel("Cheat Alert: ")
+        self.cheat_area.setFixedHeight(40)
+        self.cheat_area.setStyleSheet("color: red;")  # 用红色文字提示
+        self.cheat_area.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        # 2.3 Save 按钮（槽函数先占位）
+        self.save_button = QPushButton("Save")
+        self.save_button.setFixedSize(100, 40)
+        self.save_button.clicked.connect(self.save_board)  # 槽函数下面再定义
+
+        # 2.4 Back 按钮（继承自 BaseFunctionWindow，已经在 __init__ 里创建好）
+        # 这里我们设置它的大小，并且放到最底部
+        self.back_button.setFixedSize(100, 40)
+
+        # 2.5 把 2.1、2.2、2.3、2.4 按纵向顺序放到一个 QVBoxLayout 里
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(self.status_area)
+        right_layout.addWidget(self.cheat_area)
+        right_layout.addStretch(1)               # 在按钮和状态区之间占个“弹性”空白，让按钮靠底下
+        right_layout.addWidget(self.save_button, alignment=Qt.AlignRight)
+        right_layout.addWidget(self.back_button, alignment=Qt.AlignRight)
+
+        # 用一个 container 包裹右侧区域
+        right_container = QWidget()
+        right_container.setLayout(right_layout)
+
+        # ———————— 3. 总布局：左右并排 ———————— #
+        content_layout = QHBoxLayout()
+        content_layout.addWidget(self.video_label, stretch=2)
+        content_layout.addWidget(right_container, stretch=1)
+
+        # ———————— 4. 整个窗口的 central 布局 ———————— #
+        container = QWidget()
+        container.setLayout(content_layout)
+        self.setCentralWidget(container)
+
+        # ———————— 5. 启动摄像头线程并绑定信号 ———————— #
         self.camera_thread = CameraThread()
-        # 连接信号到更新UI的槽函数
-        self.camera_thread.frame_ready.connect(self.update_camera_view)
+        self.camera_thread.frame_ready.connect(self.update_image)
+        self.camera_thread.start()
 
-    def update_camera_view(self, image):
-        # 在主线程更新UI
-        pixmap = QPixmap.fromImage(image)
-        self.camera_label.setPixmap(pixmap)
+    @pyqtSlot(np.ndarray)
+    def update_image(self, frame: np.ndarray):
+        """
+        接收 CameraWorker 发过来的 BGR 帧，转换成 QPixmap 然后设置到 video_label。
+        """
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        scaled = qt_image.scaled(
+            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        self.video_label.setPixmap(QPixmap.fromImage(scaled))
 
-    def showEvent(self, event):
-        # 页面显示时启动摄像头线程
-        if not self.camera_thread.isRunning():
-            self.camera_thread.start()
+    def save_board(self):
+        """
+        Save 按钮的槽函数，此处先留空，后续再实现保存棋盘状态的逻辑。
+        """
+        # TODO: 在这里把当前棋盘状态保存到文件或数据库
+        pass
 
     def closeEvent(self, event):
-        # 关闭窗口时停止摄像头线程
+        """
+        关闭窗口时，一定要先停止摄像头线程，再调用父类 closeEvent
+        """
         self.camera_thread.stop()
-        event.accept()
+        self.camera_thread.wait()
+        super().closeEvent(event)
 
+    
 
 
 def main():
     app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
+
+    # 创建并显示主窗口
+    main_win = MainWindow()
+    main_win.show()
+
+    # 进入 Qt 事件循环
     sys.exit(app.exec_())
-'''
+
 
 if __name__ == "__main__":
-    camThread = CameraThread()
-    camThread.run()
+    main()
+
+
+
+
