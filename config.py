@@ -3,7 +3,9 @@ class CameraConfig:
     WIDTH = 640
     HEIGHT = 480
 class SerialConfig:
-    pass
+    INDEX = '/dev/ttyAMA0'
+    TIMEOUT = 0.1
+    
 
 
 # 将原图像切分成左中右3块
