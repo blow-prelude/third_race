@@ -14,11 +14,18 @@ import config
 # 开启多线程
 
 # from concurrent.futures import ThreadPoolExecutor
-import asyncio
 
+# 导入异步库
+# import asyncio
 
+# 导入类型注释需要的库
 from typing import List, Tuple
 
+# 导入随机库、
+import random
+
+# 导入串口库
+# import serial
 
 class CameraThread(QThread):
 
@@ -330,6 +337,7 @@ class BaseFunctionWindow(QMainWindow):
         self.main_window = main_window
         self.setWindowTitle(title)
         self.resize(600, 400)
+        # self.ser = SerialInit()
 
         # 返回按钮
         self.back_button = QPushButton("Back")
@@ -558,12 +566,62 @@ class DeployPage(BaseFunctionWindow):
                 btn.setEnabled(True)
         self.clear_mode_selection()
 
+
+    # 通过串口把黑白棋落点(序号)发送出去
     def on_deploy_clicked(self):
-        """
-        Deploy：目前仅清空所有格子上的标记（后续可加入串口发送逻辑）
-        """
+
+        black_message : List = []
+        white_message : List = []
+        
         # TODO: 串口发送逻辑放在这里
-        pass
+        black_idx, white_idx = self.get_grid_info()
+        count_black_chess = len(black_idx)
+        count_white_chess = len(white_idx)
+
+        print(f"total {count_black_chess} black chess ,they are in {black_idx}")
+        print(f"total {count_white_chess} black chess ,they are in {white_idx}")
+
+        # 发送取子和落子的序号
+
+        # 从 [0,1,2,3,4] 中随机取不重复编号用于“取子编号”
+        pick_black_src = random.sample(range(5), count_black_chess)
+        pick_white_src = random.sample(range(5), count_white_chess)
+
+        black_messages: List[str] = [
+            f"from {src} to {dst}\n" for src, dst in zip(pick_black_src, black_idx)
+        ]
+        white_messages: List[str] = [
+            f"from {src} to {dst}\n" for src, dst in zip(pick_white_src, white_idx)
+        ]
+
+        # 串口发送
+        for msg in black_messages:
+            print(f"发送黑棋指令: {msg.strip()}")
+            # ser.write(msg.encode())
+
+        for msg in white_messages:
+            print(f"发送白棋指令: {msg.strip()}")
+            # ser.write(msg.encode())
+
+
+
+    # 获得棋盘上分别有个黑棋白棋以及他们的位置
+    def get_grid_info(self) -> Tuple[List[int], List[int]]:
+        """
+        遍历 3x3 按钮矩阵，返回两个列表   
+        九宫格序号定义：从左到右、从上到下依次为 0,1,2,3,4,5,6,7,8
+        """
+        black_idx = []
+        white_idx = []
+        for row in range(3):
+            for col in range(3):
+                idx = row * 3 + col
+                text = self.grid_buttons[row][col].text().strip()
+                if text == "1":
+                    black_idx.append(idx)
+                elif text == "2":
+                    white_idx.append(idx)
+        return black_idx, white_idx
 
     # BaseFunctionWindow 已经把 return_to_main_window() 连接到 self.back_button
     # 这里不需要 override closeEvent，除非你在 DeployPage 里有其他额外资源需要释放。
@@ -651,7 +709,11 @@ class Gamer(BaseFunctionWindow):
 
     
     
-
+# 初始化串口
+class SerialInit:
+    def __init__(self):
+        # self.ser = serial.Serial(config.SerialConfig.INDEX,115200,timeout = config.SerialConfig.TIMEOUT))
+        pass
 
 def main():
     app = QApplication(sys.argv)
