@@ -1,5 +1,5 @@
 class CameraConfig:
-    INDEX = 0
+    INDEX = 1
     WIDTH = 640
     HEIGHT = 480
 class SerialConfig:
