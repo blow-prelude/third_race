@@ -1,3 +1,13 @@
-# 先手的标志位，1为系统，2为人类玩家
-# 在实际使用中，first_turn 表示自己，而 3- first_turn 表示对手
+# 先手执黑棋
+# 先手的标志位，1表示用户先手first_gamer ,反之2表示系统先手
+# 在实际使用中，first_turn 表示用户，而 3- first_turn 表示自己
 first_turn = 0
+
+
+# 判断用户是否下完
+user_ready :bool = False
+
+# 判断save按键是否被按下
+save_button_clicked = False
+# 判断是否开启作弊检测
+start_cheat_detect = False

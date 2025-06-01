@@ -33,7 +33,13 @@ class CameraThread(QThread):
     frame_ready = pyqtSignal(QImage)
 
     # 约定：1 表示“第一手玩家”赢，2 表示“另一个玩家”赢，0 表示平局
-    game_over = pyqtSignal(int)
+    game_over_sign = pyqtSignal(int)
+
+
+    # 检测到作弊信号
+    cheat_sign = pyqtSignal(bool)
+
+
 
     def __init__(self,parent=None):
         super().__init__(parent)
@@ -53,12 +59,17 @@ class CameraThread(QThread):
         self.outside_black_chess_location : List[List[float]]= []
         self.outside_white_chess_location : List[List[float]]= []
 
-
+        # 场外黑白棋的随机序列
+        self.pick_black_index: List[int] = random.sample(list(range(0,5)), 5)
+        self.pick_white_index: List[int] = random.sample(list(range(5,10)), 5)
         
 
 
         # 系统的下一次落点
-        self.move = 0
+        self.move_index = -1
+
+        # 判断人机对弈有无结束
+        self.game_finished = False
         
         # 胜利条件：行或列或对角线有3个相同的棋子
         self.win_conditions = [
@@ -148,6 +159,7 @@ class CameraThread(QThread):
         loop.close()
 
     '''
+   
     def run(self):
         while self._running:
             ret, frame = self.cap.read()
@@ -167,30 +179,80 @@ class CameraThread(QThread):
 
             # 同步执行棋盘和盘外棋子的检测
             obgr = frame.copy()
-            self.detect_outside_chess(edges, left_edge, right_edge)
+            # self.detect_outside_chess(edges, left_edge, right_edge)
             board_info = self.detect_board(edges, left_edge, right_edge, obgr)
 
             # 4. 如果成功检测到棋盘，则检测棋盘上的棋子
-            if board_info is not None:
+            if board_info :
                 self.check_board(
                     gray,
                     board_info['square_centers'],
                     board_info['square_radius']
                 )
-
-                # 5. 检查赢家，利用minimax算法进行下一步的落子
-                self.winner = self.check_winner(self.board_status)
-                self.move = self.find_best_move(self.board_status)
-                print(f"next i will go to {self.move}")
                 
-                if self.winner == -1:
-                    print("game is not over yet!")
+                # 如果用户已经下完棋子，那么系统开始规划下棋
 
-                if self.winner != -1:
-                    print("result has been sent!")
-                    self.game_over.emit(self.winner)
+                # 更完美的做法是电机回到原点后发送数据，接收到该信号后检测是否有赢家
+                if globals.user_ready == True and self.game_finished == False:
+                    # 5. 检查赢家，如果胜负未分就用算法规划下一步的落子
+                    self.winner = self.check_winner(self.board_status)
+                    
+                    if self.winner == -1:
+                        print("game is not over yet!")
+                        self.move_index = self.find_best_move(self.board_status)
 
-                            
+                        # 用户先手，系统取白子
+                        if globals.first_turn==1:
+                            if self.pick_white_index:
+                                pick_index = self.pick_white_index.pop(0)
+                                print(f'white from {pick_index} to {self.move_index}\n')
+                                # self.ser.sendString(pick_index,self.move_index)
+                                # 重新等待用户
+                                globals.first_turn = False
+
+                        # 系统先手，取黑子
+                        elif globals.first_turn==2:
+                            if self.pick_black_index:
+                                pick_index = self.pick_black_index.pop(0)
+                                print(f'black from {pick_index} to {self.move_index}\n')
+                                # self.ser.sendString(pick_index,self.move_index)
+                                # 重新等待用户
+                                globals.first_turn = False
+
+
+                    elif self.winner != -1:
+                        print("result has been sent!")
+                        self.game_over_sign.emit(self.winner)
+                        self.game_finished = True
+
+
+                # 如果save按键被按下，就保存当前棋盘状态
+                if globals.save_button_clicked == True:
+                    save_board_status = board_info['board_status']
+                    globals.save_button_clicked = False
+
+                # 作弊检测
+                if globals.start_cheat_detect == True:
+                    current_board_status = board_info['board_status']
+                    if save_board_status == current_board_status:
+                        self.cheat_sign.emit(False)
+                    else:
+                        print('you have cheated ! !')
+                        self.cheat_sign.emit(True)
+                        # 检测哪些区域发生改变
+                        detect_difference = [idx for idx,(current,save) in
+                                             enumerate(zip(current_board_status,save_board_status))
+                                             if current != save]
+
+                        if len(detect_difference)==2:
+                            for i in range(len(detect_difference)):
+                                # 获取原先不为空且发生改变的区域,需要将棋子运回该方格
+                                if save_board_status[i] != 0:
+                                    cheat_start_idx = detect_difference[i]
+                                    cheat_end_idx = detect_difference[1-i]
+                                    print(f'recover from {cheat_end_idx} to {cheat_start_idx}\n')
+                                    # self.ser.sendString(cheat_end_idx,cheat_start_idx,is_cheat=True)
+
 
 
             # 转为 QImage 并发射
@@ -200,6 +262,49 @@ class CameraThread(QThread):
             self.frame_ready.emit(img)
 
         self.cap.release()
+  
+
+    '''
+    def run(self):
+
+            while self._running:
+                ret, frame = self.cap.read()
+                if not ret:
+                    print("Failed to grab frame")
+                    break
+
+                    # 1. 预处理：灰度 + 闭操作 + Canny
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                kernels = np.ones((5, 5), dtype=np.uint8)
+                closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernels, iterations=5)
+                edges = cv2.Canny(closed, config.CANNY_THRESH1, config.CANNY_THRESH2)
+
+                    # 2. 计算左右边缘区域的 x 坐标
+                left_edge = int(frame.shape[1] * config.LEFT_EDGE_RATIO)
+                right_edge = int(frame.shape[1] * config.RIGHT_EDGE_RATIO)
+
+                    # 同步执行棋盘和盘外棋子的检测
+                obgr = frame.copy()
+                    # self.detect_outside_chess(edges, left_edge, right_edge)
+                board_info = self.detect_board(edges, left_edge, right_edge, obgr)
+
+                    # 4. 如果成功检测到棋盘，则检测棋盘上的棋子
+                if board_info:
+                    self.check_board(
+                        gray,
+                        board_info['square_centers'],
+                        board_info['square_radius']
+                    )
+
+                # 仅仅将原始摄像头帧直接转 QImage，不做后续任何处理
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb.shape
+                img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+                self.frame_ready.emit(img)
+                # self.msleep(30)
+
+            self.cap.release()
+    '''
 
 
     # 计算给定的2点之间的欧几里得距离
@@ -251,7 +356,7 @@ class CameraThread(QThread):
 
         # 面积最大的就是棋盘
         biggest_area : int = 0
-        biggest = None
+        biggest = []
         board_cons = cv2.findContours(cv2.bitwise_and(edges,edges,mask),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)[0]
         if board_cons is not None:
             for con in board_cons:
@@ -260,114 +365,12 @@ class CameraThread(QThread):
                     biggest_area = area
                     biggest = con
         
-        if biggest is not None:
-            #  # 计算轮廓的边界框
-            #     x, y, w, h = cv2.boundingRect(biggest)
-
-            #     # 如果边界框的面积大于一定值，那么就认为它是一个大的矩形
-            #     if w * h > 40000:  # 测试出来基本4万以上就很稳了，可自行调节
-                   
-            #         # 画出当前矩形
-            #         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-
-            #         # 获取旋转矩形的中心点坐标、宽高和旋转角度
-            #         rect = cv2.minAreaRect(biggest)
-            #         # 获取旋转矩形的四个角点
-            #         box = cv2.boxPoints(rect)
-
-            #         # 将角点坐标转换为整数
-            #         box = np.intp(box)
-
-            #         # 计算四个角点的中心点
-            #         center_points = np.mean(box, axis=0)
-
-            #         # 对四个顶点进行排序，从左到右，从上到下
-            #         sorted_box = sorted(box, key=lambda p: (p[1], p[0]))
-            #         # sorted_box = box
-
-            #         # 通过中心点坐标的排序
-            #         top_left = min(sorted_box, key=lambda p: p[0] + p[1])
-            #         bottom_right = max(sorted_box, key=lambda p: p[0] + p[1])
-            #         top_right = min(sorted_box, key=lambda p: p[0] - p[1])
-            #         bottom_left = max(sorted_box, key=lambda p: p[0] - p[1])
-
-  
-            #         # 计算矩形边长的一半
-            #         self.square_radius = np.linalg.norm(top_right - top_left) / 6
-                                    
-
-            #         sorted_box = [top_left, top_right, bottom_right, bottom_left]
-
-            #         # 重新计算四个顶点的坐标
-            #         self.top_left = tuple(sorted_box[0])
-            #         self.top_right = tuple(sorted_box[1])
-            #         self.bottom_right = tuple(sorted_box[2])
-            #         self.bottom_left = tuple(sorted_box[3])
-
-            #         # 计算大矩形的旋转角度
-            #         self.angle = np.arctan2(self.bottom_right[1] - self.top_right[1], self.bottom_right[0] - self.top_right[0])
-            #         print(self.angle)
-            #         # 创建旋转矩阵
-            #         rotation_matrix = np.array([[np.cos(self.angle), -np.sin(self.angle)], [np.sin(self.angle), np.cos(self.angle)]])
-
-            #         # 初始化一个列表用于存储小正方形的中心点坐标和编号
-            #         self.squares_center = []
-            #         # 初始化一个列表用于存储小正方形的四个顶点坐标
-            #         self.square_points = []
-
-            #         # 计算大矩形的中心点
-            #         self.center_big_square = np.array([(self.top_left[0] + self.bottom_right[0]) / 2, (self.top_left[1] + self.bottom_right[1]) / 2])
-
-            #         # 确保 self.royal_rect_points 是一个 NumPy 数组
-
-            #         self.royal_rect_points = np.array([self.top_left, self.top_right, self.bottom_right, self.bottom_left], dtype=np.int32)
-            #         self.royal_rect_points = self.royal_rect_points.reshape((-1, 1, 2))
-
-            #         # 计算旋转矩阵的宽度和高度
-            #         self.width = max(self.compute_distance(self.top_left, self.top_right), self.compute_distance(self.bottom_left, self.bottom_right))
-            #         self.height = max(self.compute_distance(self.top_left, self.bottom_left), self.compute_distance(self.top_right, self.bottom_right))
-
-            #         #绘制出当前矩形
-            #         cv2.drawContours(frame, [box], 0, (0, 255, 0), 2)
-            #         # 定义顺序，最左上角开始编号
-            #         square_order = [
-            #             (0, 0), (0, 1), (0, 2),
-            #             (1, 0), (1, 1), (1, 2),
-            #             (2, 0), (2, 1), (2, 2)
-            #         ]
-
-            #         if self.angle < 0:
-            #             # 计算每个小正方形的中心点坐标和编号
-            #             for row, col in square_order:
-            #                 # 计算小正方形的中心点相对于大矩形中心点的坐标
-            #                 relative_center = np.array([(2 * col - 2) * self.width / 6, (2 * row - 2) * self.height / 6])
-
-            #                 # 使用旋转矩阵来旋转小正方形的中心点
-            #                 rotated_center = np.dot(rotation_matrix, relative_center)
-
-            #                 # 计算小正方形的中心点的绝对坐标
-            #                 absolute_center = self.center_big_square + rotated_center
-
-            #                 # 将中心坐标和编号添加到列表中
-            #                 self.squares_center.append((absolute_center, row * 3 + col + 1))
-            #         else:
-            #             # 以列为主的顺序计算每个小正方形的中心点坐标和编号
-            #             for col, row in square_order:
-            #                 # 计算小正方形的中心点相对于大矩形中心点的坐标
-            #                 relative_center = np.array([(2 * col - 2) * self.width / 6, (2 * row - 2) * self.height / 6])
-            #                 # 使用旋转矩阵来旋转小正方形的中心点
-            #                 rotated_center = np.dot(rotation_matrix, relative_center)
-            #                 # 计算小正方形的中心点的绝对坐标
-            #                 absolute_center = self.center_big_square + rotated_center
-            #                 # 将中心坐标和编号添加到列表中
-            #                 self.squares_center.append((absolute_center, row * 3 + col + 1))
-            #                 # 画出每个小正方形的内接圆
-            #                 cv2.circle(frame, (int(absolute_center[0]), int(absolute_center[1])), int(self.square_radius), (255, 0, 0), 2)
-                
-                # 使用最小外接矩形而非 approxPolyDP
+        if biggest != []:
+          
+            # 使用最小外接矩形
             rect = cv2.minAreaRect(biggest)  # ((cx, cy), (w, h), angle)
-            box = cv2.boxPoints(rect)        # 得到 4 个角点，顺时针
+            # 转化成4个角点的坐标
+            box = cv2.boxPoints(rect)        
             box = np.array(box, dtype=np.float32)
 
             # 手动排序为：top-left, top-right, bottom-right, bottom-left
@@ -425,7 +428,7 @@ class CameraThread(QThread):
                 rel_y = (2 * row - 2) * self.square_radius
                 rel_vec = np.array([rel_x, rel_y], dtype=np.float32)
 
-                rotated = np.dot(rotation_matrix, rel_vec.reshape(2, 1)).reshape(2,)
+                rotated = np.dot(rotation_matrix, rel_vec.reshape(2,1)).flatten()
                 abs_center = self.board_center + rotated
                 square_centers.append((abs_center, row * 3 + col + 1))
 
@@ -440,118 +443,13 @@ class CameraThread(QThread):
                 'board_corners': (top_left, top_right, bottom_right, bottom_left)
             }
             return result
-            # perimeter = cv2.arcLength(biggest, True)
-            # board = cv2.approxPolyDP(biggest,config.EPSILON_RATIO*perimeter,True)
-            # if len(board) == 4:
-            #     # 提取四个顶点，并根据左上/右上/右下/左下排序
-            #     # box = np.intp([pt[0] for pt in board])  # shape (4,2)
-            #     # # 根据 x+y 最小=> 左上，x+y 最大=> 右下，x-y 最大=> 右上，y-x 最大=> 左下
-            #     # top_left     = min(box,    key=lambda p: p[0] + p[1]) 
-            #     # bottom_right = max(box,    key=lambda p: p[0] + p[1]) 
-            #     # top_right    = min(box,    key=lambda p: p[0] - p[1]) 
-            #     # bottom_left  = max(box,    key=lambda p: p[1] - p[0]) 
-
-            #     box = np.array([pt[0] for pt in board], dtype=np.float32)
-
-            #     # 使用极角排序顶点：返回左上、右上、右下、左下（逆时针）
-            #     def sort_box_points(pts):
-            #         center = np.mean(pts, axis=0)
-            #         def angle(p):
-            #             return np.arctan2(p[1] - center[1], p[0] - center[0])
-            #         return np.array(sorted(pts, key=angle), dtype=np.float32)
-
-            #     sorted_box = sort_box_points(box)
-            #     top_left, top_right, bottom_right, bottom_left = sorted_box
-            #     # # 画出棋盘边框以调试
-            #     # cv2.rectangle(frame, tuple(top_left), tuple(bottom_right), (200,0,0), 1)
-
-            #         # 调试：画四个角点
-            #     cv2.circle(frame, tuple(top_left.astype(int)), 5, (255, 0, 0), -1)      # 蓝色
-            #     cv2.circle(frame, tuple(top_right.astype(int)), 5, (0, 255, 0), -1)     # 绿色
-            #     cv2.circle(frame, tuple(bottom_right.astype(int)), 5, (0, 0, 255), -1)  # 红色
-            #     cv2.circle(frame, tuple(bottom_left.astype(int)), 5, (0, 255, 255), -1) # 黄色
-
-            #      # 计算棋盘宽度和高度
-            #     w1 = self.compute_distance(top_left, top_right)
-            #     w2 = self.compute_distance(bottom_left, bottom_right)
-            #     h1 = self.compute_distance(top_left, bottom_left)
-            #     h2 = self.compute_distance(top_right, bottom_right)
-            #     self.board_width = float((w1 + w2) / 2.0)
-            #     self.board_height = float((h1 + h2) / 2.0)
-            #     # 棋盘中心：取左上与右下的中点
-            #     self.board_center = (top_left.astype(np.float32) + bottom_right.astype(np.float32)) / 2.0
-
-            #     # 计算每个小格子内接圆半径
-            #     self.square_radius = float(np.mean([self.board_width, self.board_height]) / 6.0)
-            #     print(f'square_radius = {self.square_radius}')
-                
-            #     '''
-            #     # 计算 9 个小格子的中心 (在棋盘坐标系中先算，再做旋转)
-            #     # 先求棋盘在图像中的旋转角度
-            #     delta = bottom_right.astype(np.float32) - top_right.astype(np.float32)
-            #     rotate_angle = np.arctan2(delta[1], delta[0])  # 逆时针为正
-            #     rotation_matrix = np.array([
-            #         [np.cos(rotate_angle), -np.sin(rotate_angle)],
-            #         [np.sin(rotate_angle),  np.cos(rotate_angle)]
-            #     ], dtype=np.float32)
-
-            #     # 棋盘中心拿去算完后作为旋转中心
-            #     # 9 个小格子在“未旋转”状态下，相对于棋盘中心的偏移：
-            #     square_order = [
-            #         (0, 0), (0, 1), (0, 2),
-            #         (1, 0), (1, 1), (1, 2),
-            #         (2, 0), (2, 1), (2, 2)
-            #     ]
-            #     centers = []
-            #     for row, col in square_order:
-            #         # 未旋转时：每个方格中心相对于棋盘中心的偏移向量
-            #         rel_x = (2 * col - 2) * self.square_radius
-            #         rel_y = (2 * row - 2) * self.square_radius
-            #         rel_vec = np.array([rel_x, rel_y], dtype=np.float32)
-
-            #         # 旋转
-            #         rotated =np.dot( rotation_matrix,rel_vec.reshape(2,1)).reshape(2,)
-
-            #         abs_center = self.board_center + rotated
-            #         centers.append((abs_center, row * 3 + col + 1))
-            #         '''
-                
-            #     # # 棋盘 x 轴方向：从 top_left 到 top_right
-            #     # vec_x = (top_right - top_left).astype(np.float32)
-            #     # # 棋盘 y 轴方向：从 top_left 到 bottom_left
-            #     # vec_y = (bottom_left - top_left).astype(np.float32)
-
-            #     # # 标准化为单位向量
-            #     # vec_x /= np.linalg.norm(vec_x)
-            #     # vec_y /= np.linalg.norm(vec_y)
-
-            #     # # 每个格子中心在棋盘坐标下的位置（以 top_left 为原点）
-            #     # square_centers = []
-            #     # for row in range(3):
-            #     #     for col in range(3):
-            #     #         offset = ((col + 0.5) * self.board_width / 3) * vec_x + ((row + 0.5) * self.board_height / 3) * vec_y
-            #     #         # 计算绝对坐标
-            #     #         abs_center = top_left + offset
-            #     #         square_centers.append((abs_center, row * 3 + col + 1))
+           
 
 
-
-
-            #             # 可视化：画出小圆
-            #         cv2.circle(frame,
-            #                 (int(abs_center[0]), int(abs_center[1])),
-            #                 int(self.square_radius),
-            #                 (255, 0, 0), 2)
-
-            #         # 将结果打包返回
-            #     result = {
-            #         'square_centers': square_centers,
-            #         'square_radius': self.square_radius,
-            #         'board_corners': (top_left, top_right, bottom_right, bottom_left)
-            #     }
-            #     return result
-
-
+    # 重置棋盘状态
+    def reset_board_status(self):
+        self.pick_black_index = random.sample(list(range(5)),5)
+        self.pick_white_index = random.sample(list(range(5,10)),5)
 
     # 识别每个方格内是否有棋子，状态分别是0，1，2
     # 暂且先试试灰度图像的处理效果
@@ -561,10 +459,7 @@ class CameraThread(QThread):
             # 创建掩膜：一个和 gray 一样大小的全零矩阵
             h, w = gray.shape
             mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.circle(mask,
-                       (int(center[0]), int(center[1])),
-                       int(square_radius),  # 半径
-                       1, -1)
+            cv2.circle(mask,(int(center[0]), int(center[1])),int(square_radius), 1, -1)
 
             # 计算该圆内的平均灰度值
             mean_val = cv2.mean(gray, mask=mask)[0]
@@ -604,19 +499,19 @@ class CameraThread(QThread):
     def evaluate(self, board_status):
         winner = self.check_winner(board_status)
         if winner == globals.first_turn:
-            return 10
-        elif winner == 3 - globals.first_turn:
             return -10
+        elif winner == 3 - globals.first_turn:
+            return 10
 
         score = 0
         for (a, b, c) in self.win_conditions:
             line = [board_status[a], board_status[b], board_status[c]]
             # 如果这一条线我方占2个空一个，+5分
             if line.count(globals.first_turn) == 2 and line.count(0) == 1:
-                score += 5
+                score -= 4
             # 如果这一条线对方占2个空一个，-4分
             if line.count(3 - globals.first_turn) == 2 and line.count(0) == 1:
-                score -= 4
+                score += 5
 
         return score
 
@@ -636,7 +531,7 @@ class CameraThread(QThread):
             best = -float('inf')
             for i in range(9):
                 if board_status[i] == 0:
-                    board_status[i] = globals.first_turn
+                    board_status[i] = 3 - globals.first_turn
                     best = max(best, self.minimax(board_status, depth + 1, alpha, beta, False))
                     board_status[i] = 0
                     alpha = max(alpha, best)
@@ -647,7 +542,7 @@ class CameraThread(QThread):
             best = float('inf')
             for i in range(9):
                 if board_status[i] == 0:
-                    board_status[i] = 3 - globals.first_turn
+                    board_status[i] = globals.first_turn
                     best = min(best, self.minimax(board_status, depth + 1, alpha, beta, True))
                     board_status[i] = 0
                     beta = min(beta, best)
@@ -660,22 +555,22 @@ class CameraThread(QThread):
     # 遍历所有可能的落子点，返回评分最高的点
     def find_best_move(self, board_status):
         best_val = -float('inf')
-        self.move = -1
+        move_index = -1
 
         for i in range(9):
             # 在每个空的方框内假设自己落子
             # 然后用minimax算法模拟对手反应以及后续的可能性
             if board_status[i] == 0:
-                board_status[i] = globals.first_turn
+                board_status[i] = 3 - globals.first_turn
                 move_val = self.minimax(board_status, 0, -float('inf'), float('inf'), False)
                 board_status[i] = 0
 
                 # 如果当前评分更好，或者在九宫格中心，就更新最优落点
                 if move_val > best_val or (move_val == best_val and i == 4):
-                    self.move = i
+                    move_index = i
                     best_val = move_val
 
-        return self.move
+        return move_index
 
 
 
@@ -702,6 +597,7 @@ class BaseFunctionWindow(QMainWindow):
 
     def return_to_main_window(self):
         """返回主界面"""
+
         self.main_window.show()
         self.close()
 
@@ -715,7 +611,7 @@ class MainWindow(QMainWindow):
     def initUI(self):
         self.resize(600,400)
 
-        # 在主界面竖直居中排列3个botton
+        # 在主界面竖直居中排列3个button
 
         # 分别创建3个按钮
         self.button1 = QPushButton("deploy", self)
@@ -753,8 +649,11 @@ class MainWindow(QMainWindow):
         self.camera_thread = CameraThread()
         self.camera_thread.frame_ready.connect(self.first_gamer_window.update_image)
         self.camera_thread.frame_ready.connect(self.second_gamer_window.update_image)
-        self.camera_thread.game_over.connect(self.first_gamer_window.on_game_over)
-        self.camera_thread.game_over.connect(self.second_gamer_window.on_game_over)
+        self.camera_thread.game_over_sign.connect(self.first_gamer_window.on_game_over)
+        self.camera_thread.game_over_sign.connect(self.second_gamer_window.on_game_over)
+        self.camera_thread.cheat_sign.connect(self.first_gamer_window.on_cheat_found)
+        self.camera_thread.cheat_sign.connect(self.second_gamer_window.on_cheat_found)
+        # 启动run（）方法
         self.camera_thread.start()
 
 
@@ -765,14 +664,19 @@ class MainWindow(QMainWindow):
 
     def switch_to_first(self, target_window):
         """切换到first窗口"""
+        # 用户先手，执黑棋
         globals.first_turn = 1
+        # 系统执白棋，初始化取白棋的列表
+        self.camera_thread.reset_board_status()
         target_window.show()
         self.hide()
 
 
     def switch_to_second(self, target_window):
         """切换到second窗口"""
+        # 系统先手
         globals.first_turn = 2
+        self.camera_thread.reset_board_status()
         target_window.show()
         self.hide()
 
@@ -938,10 +842,12 @@ class DeployPage(BaseFunctionWindow):
     # 通过串口把黑白棋落点(序号)发送出去
     def on_deploy_clicked(self):
 
-        black_message : List = []
-        white_message : List = []
+        move_black_cmd : List = []
+        move_white_cmd : List = []
         
         # TODO: 串口发送逻辑放在这里
+
+        # 获得落子的序号
         black_idx, white_idx = self.get_grid_info()
         count_black_chess = len(black_idx)
         count_white_chess = len(white_idx)
@@ -949,27 +855,41 @@ class DeployPage(BaseFunctionWindow):
         print(f"total {count_black_chess} black chess ,they are in {black_idx}")
         print(f"total {count_white_chess} black chess ,they are in {white_idx}")
 
-        # 发送取子和落子的序号
+
 
         # 从 [0,1,2,3,4] 中随机取不重复编号用于“取子编号”
         pick_black_src = random.sample(range(5), count_black_chess)
         pick_white_src = random.sample(range(5), count_white_chess)
 
-        black_messages: List[str] = [
-            f"from {src} to {dst}\n" for src, dst in zip(pick_black_src, black_idx)
-        ]
-        white_messages: List[str] = [
-            f"from {src} to {dst}\n" for src, dst in zip(pick_white_src, white_idx)
-        ]
+        # black_messages: List[str] = [
+        #     f"from {src} to {dst}\n" for src, dst in zip(pick_black_src, black_idx)
+        # ]
+        # white_messages: List[str] = [
+        #     f"from {src} to {dst}\n" for src, dst in zip(pick_white_src, white_idx)
+        # ]
 
-        # 串口发送
-        for msg in black_messages:
-            print(f"发送黑棋指令: {msg.strip()}")
-            # ser.write(msg.encode())
+        # # 串口发送
+        # for msg in black_messages:
+        #     print(f"发送黑棋指令: {msg.strip()}")
+        #     # self.ser.ser.write(msg.encode())
+        #
+        # for msg in white_messages:
+        #     print(f"发送白棋指令: {msg.strip()}")
+        #     # self.ser.ser.write(msg.encode())
 
-        for msg in white_messages:
-            print(f"发送白棋指令: {msg.strip()}")
-            # ser.write(msg.encode())
+
+        # 发送坐标序号
+        move_black_cmd = [(src,dst) for src,dst in zip(pick_black_src, black_idx)]
+        for src, dst in move_black_cmd:
+            print(f"move black from {src} to {dst}\n")
+            # self.ser.sendString(src,dst)
+
+        move_white_cmd = [(src, dst) for src, dst in zip(pick_white_src, white_idx)]
+        for src, dst in move_white_cmd:
+            print(f"move white from {src} to {dst}\n")
+            # self.ser.sendString(src,dst)
+
+
 
 
 
@@ -1002,6 +922,9 @@ class Gamer(BaseFunctionWindow):
     def __init__(self, main_window, lecture_title):
         super().__init__(main_window, lecture_title)
 
+        # save按键是否被点击，即是否开启反作弊模式
+        self.cheat_mode_on = False
+
         # 界面左侧放一个 QLabel，用来显示视频帧 
         self.video_label = QLabel()
         # 给一个初始大小，后面可以根据需要调整
@@ -1014,7 +937,7 @@ class Gamer(BaseFunctionWindow):
         self.status_area = QTextEdit()
         self.status_area.setReadOnly(True)
         self.status_area.setFixedHeight(80)
-        self.status_area.setPlaceholderText("Status: your turn / my turn / you win / you lose")
+        self.status_area.setPlaceholderText("Status: ")
         #（以后可以用 self.status_area.append("your turn") 之类更新）
 
         # 2.2 作弊提示区：用 QLabel 即可
@@ -1028,16 +951,23 @@ class Gamer(BaseFunctionWindow):
         self.save_button.setFixedSize(100, 40)
         self.save_button.clicked.connect(self.save_board)  # 槽函数下面再定义
 
-        # 2.4 Back 按钮（继承自 BaseFunctionWindow，已经在 __init__ 里创建好）
+        # 2.4 ready 按钮
+        self.ready_button = QPushButton("Ready")
+        self.ready_button.setFixedSize(100, 40)
+        self.ready_button.clicked.connect(self.user_have_ready)
+
+        # 2.5 Back 按钮（继承自 BaseFunctionWindow，已经在 __init__ 里创建好）
         # 这里我们设置它的大小，并且放到最底部
         self.back_button.setFixedSize(100, 40)
 
-        # 2.5 把 2.1、2.2、2.3、2.4 按纵向顺序放到一个 QVBoxLayout 里
+        # 2.6 把 2.1、2.2、2.3、2.4 2.5按纵向顺序放到一个 QVBoxLayout 里
         right_layout = QVBoxLayout()
         right_layout.addWidget(self.status_area)
         right_layout.addWidget(self.cheat_area)
-        right_layout.addStretch(1)               # 在按钮和状态区之间占个“弹性”空白，让按钮靠底下
+         # 在按钮和状态区之间占个“弹性”空白，让按钮靠底下
+        right_layout.addStretch(1)              
         right_layout.addWidget(self.save_button, alignment=Qt.AlignRight)
+        right_layout.addWidget(self.ready_button, alignment=Qt.AlignRight)
         right_layout.addWidget(self.back_button, alignment=Qt.AlignRight)
 
         # 用一个 container 包裹右侧区域
@@ -1065,43 +995,92 @@ class Gamer(BaseFunctionWindow):
     # 接收整数的槽，即接收最终赢家的信号
     @pyqtSlot(int)
     def on_game_over(self, winner: int):
- 
-        # 先把之前的文字清空或者追加也行
-        self.status_area.clear()
-
         if winner == 0:
             self.status_area.append("Draw!")
         
         else:
-            if winner == globals.first_turn:
+            if winner == 3 - globals.first_turn:
                 self.status_area.append("you lose!")
             else:
                 self.status_area.append("you win!")
 
+    # 接收作弊信号
+    @pyqtSlot(bool)
+    def on_cheat_found(self,cheat_flag: bool):
+        if cheat_flag:
+            self.cheat_area.append("you cheat!!")
+
         
             
-
+    # 保存当前棋盘的状态
     def save_board(self):
-        """
-        Save 按钮的槽函数，此处先留空，后续再实现保存棋盘状态的逻辑。
-        """
-        # TODO: 在这里把当前棋盘状态保存到文件或数据库
-        pass
+        # 切换状态
+
+        self.cheat_mode_on = not self.cheat_mode_on
+
+        #  第一次点击，按钮变灰
+        if self.cheat_mode_on:
+            self.save_button.setStyleSheet("background-color: gray; color: white;")
+            self.save_button.setText("Cheat ON")
+            globals.save_button_clicked = True
+            globals.start_cheat_detect = True
+        else:
+            # 再次点击，按钮变亮
+            self.save_button.setStyleSheet("")
+            self.save_button.setText("Save")
+            globals.save_button_clicked = False
+            globals.start_cheat_detect = False
+
+
+    # 表示用户已经下完棋，此时系统可以开始规划如何下棋
+    def user_have_ready(self):
+        if globals.user_ready == False:
+            globals.user_ready = True
+
 
 
 
     def closeEvent(self, event):
     # 拦截关闭事件，隐藏窗口而不是关闭
-    # self.hide()
-    # event.ignore()
-        super().closeEvent(event)
+        self.hide()
+        event.ignore()
+    #     super().closeEvent(event)
 
-    
-    
+
+class CreateGenerator:
+    def __init__(self,length):
+        self.length = length
+        self.reset()
+
+    # 重置生成器对象
+    def reset(self):
+        self.generator = self.generate
+
+    # 创建生成器，从0-4的随机不重复整数
+    def generate(self):
+        for i in range(self.length):
+            yield random.choice(self.generator)
+
+
 # 初始化串口
 class SerialInit:
     def __init__(self):
         # self.ser = serial.Serial(config.SerialConfig.INDEX,115200,timeout = config.SerialConfig.TIMEOUT))
+        pass
+    
+    def sendString(self, dst :int ,src :int,is_cheat=False):
+        """
+        发送字符串到串口
+        """
+        # if self.ser.is_open:
+        #     if not is_cheat:
+            #     format_string = f'deploy from {dst} to {src}\n'
+            #     self.ser.write(format_string.encode())
+            # else:
+            #     format_string = f'recover from {dst} to {src}\n'
+            #     self.ser.write(format_string.encode())
+        # else:
+        #     print("Serial port is not open!")
         pass
 
 def main():
