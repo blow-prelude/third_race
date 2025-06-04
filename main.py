@@ -189,6 +189,18 @@ class CameraThread(QThread):
                     board_info['square_centers'],
                     board_info['square_radius']
                 )
+
+                # 判断棋盘是否旋转
+                board_corners = board_info['board_corners']
+
+                # 左上和右上如果水平上近似相等，就认为没有旋转
+                if abs(board_corners[0][0]-board[1][0]) <= config.HOR_DEVIATION :
+                    globals.isrotate = False
+                # 左上和右下如果竖直上近似相等，就认为旋转
+                elif abs(board_corners[0][1]-board[2][1]) <= config.VER_DEVIATION :
+                    globals.isrotate = True
+
+                print(f'isrotate : {globals.isrotate}')
                 
                 # 如果用户已经下完棋子，那么系统开始规划下棋
 
@@ -264,47 +276,7 @@ class CameraThread(QThread):
         self.cap.release()
   
 
-    '''
-    def run(self):
-
-            while self._running:
-                ret, frame = self.cap.read()
-                if not ret:
-                    print("Failed to grab frame")
-                    break
-
-                    # 1. 预处理：灰度 + 闭操作 + Canny
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                kernels = np.ones((5, 5), dtype=np.uint8)
-                closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernels, iterations=5)
-                edges = cv2.Canny(closed, config.CANNY_THRESH1, config.CANNY_THRESH2)
-
-                    # 2. 计算左右边缘区域的 x 坐标
-                left_edge = int(frame.shape[1] * config.LEFT_EDGE_RATIO)
-                right_edge = int(frame.shape[1] * config.RIGHT_EDGE_RATIO)
-
-                    # 同步执行棋盘和盘外棋子的检测
-                obgr = frame.copy()
-                    # self.detect_outside_chess(edges, left_edge, right_edge)
-                board_info = self.detect_board(edges, left_edge, right_edge, obgr)
-
-                    # 4. 如果成功检测到棋盘，则检测棋盘上的棋子
-                if board_info:
-                    self.check_board(
-                        gray,
-                        board_info['square_centers'],
-                        board_info['square_radius']
-                    )
-
-                # 仅仅将原始摄像头帧直接转 QImage，不做后续任何处理
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb.shape
-                img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
-                self.frame_ready.emit(img)
-                # self.msleep(30)
-
-            self.cap.release()
-    '''
+    
 
 
     # 计算给定的2点之间的欧几里得距离
@@ -349,7 +321,7 @@ class CameraThread(QThread):
 
     # 异步协程：检测棋盘（中间区域），找到最大的四边形轮廓，计算出棋盘参数并返回
     # 返回值是字典类型，分别是小方格中心坐标，小方格半径，棋盘4个角点
-    def detect_board(self, edges: np.ndarray, left_edge: int, right_edge: int, frame: np.ndarray):
+    def  detect_board(self, edges: np.ndarray, left_edge: int, right_edge: int, frame: np.ndarray):
         mask = np.zeros_like(edges)
         # 中间区域全为255,左右边缘为0
         mask[: , left_edge:right_edge] = 255
@@ -389,6 +361,9 @@ class CameraThread(QThread):
             else:
                 bottom_right, bottom_left = bottom_points
 
+
+            print(f'top_left = {top_left}, top_right = {top_right}, bottom_right = {bottom_right}, bottom_left = {bottom_left}\n')
+
             # 再组合为有序四边形
             sorted_box = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
 
@@ -409,7 +384,7 @@ class CameraThread(QThread):
             print(f'square_radius = {self.square_radius}')
 
             # 棋盘角度（顺时针为负）
-            delta = bottom_right - top_right
+            delta = ((bottom_right - bottom_left)+(top_right - top_left)) / 2.0
             rotate_angle = np.arctan2(delta[1], delta[0])  # 弧度
             rotation_matrix = np.array([
                 [np.cos(rotate_angle), -np.sin(rotate_angle)],
@@ -433,7 +408,12 @@ class CameraThread(QThread):
                 square_centers.append((abs_center, row * 3 + col + 1))
 
                 # 可视化圆心
-                cv2.circle(frame, (int(abs_center[0]), int(abs_center[1])), int(self.square_radius), (255, 0, 0), 2)
+                cv2.circle(frame, (int(abs_center[0]), int(abs_center[1])),
+                            int(self.square_radius), (255, 0, 0), 2)
+                
+                cv2.putText(frame, str(row * 3 + col + 1), 
+                    (int(abs_center[0]), int(abs_center[1])), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,255,0), 1)
 
             
             self.square_centers = square_centers
@@ -616,16 +596,16 @@ class MainWindow(QMainWindow):
         # 分别创建3个按钮
         self.button1 = QPushButton("deploy", self)
         self.button1.clicked.connect(lambda: self.switch_to_deploy(self.deploy_window))
-        self.button1.setFixedSize(100, 50)
+        self.button1.setFixedSize(200, 50)
         # self.button1.setStyleSheet("background-color: white; color: black; font-size: 20px;")
 
         self.button2 = QPushButton("first_gamer", self)
         self.button2.clicked.connect(lambda: self.switch_to_first(self.first_gamer_window))
-        self.button2.setFixedSize(100, 50)
+        self.button2.setFixedSize(200, 50)
 
         self.button3 = QPushButton("secong_gamer", self)
         self.button3.clicked.connect(lambda: self.switch_to_second(self.second_gamer_window))
-        self.button3.setFixedSize(100, 50)
+        self.button3.setFixedSize(200, 50)
 
         # 创建主界面布局
         layout = QVBoxLayout()
@@ -1074,8 +1054,12 @@ class SerialInit:
         """
         # if self.ser.is_open:
         #     if not is_cheat:
-            #     format_string = f'deploy from {dst} to {src}\n'
-            #     self.ser.write(format_string.encode())
+            #     if globals.isrotate:
+                #     format_string = f'deploy from {dst} to {src}\n'
+                #     self.ser.write(format_string.encode())
+            #     else:
+                #     format_string = f'isrotate from {dst} to {src}\n'
+                #     self.ser.write(format_string.encode())
             # else:
             #     format_string = f'recover from {dst} to {src}\n'
             #     self.ser.write(format_string.encode())
