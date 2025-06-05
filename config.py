@@ -1,5 +1,5 @@
 class CameraConfig:
-    INDEX = 1
+    INDEX = 0
     WIDTH = 640
     HEIGHT = 480
 class SerialConfig:
@@ -27,9 +27,12 @@ CHESS_RADIUS_MAX = 60
 # 逼近多边形时用到的参数
 EPSILON_RATIO = 0.01
 
-# 判断每个小方格的状态，一个是黑棋，一个是白棋
-WHITE_CHESS_THRESH = 180
-BLACK_CHESS_THRESH = 50
+# 判断每个小方格的状态
+SQUARE_LIGHTNESS_HIGH_THRESH = 140
+SQUARE_LIGHTNESS_LOW_THRESH = 95
+SQUARE_GREEN_HIGH_THRESH = 140
+SQUARE_GREEN_LOW_THRESH = 95
+
 
 # 判断是否发生旋转的水平和竖直误差
 HOR_DEVIATION = 50

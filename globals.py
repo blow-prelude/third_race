@@ -3,6 +3,8 @@
 # 在实际使用中，first_turn 表示用户，而 3- first_turn 表示自己
 first_turn = 0
 
+# 判断人机对弈有无结束
+game_finished = False
 
 # 判断用户是否下完
 user_ready :bool = False

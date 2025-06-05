@@ -53,7 +53,7 @@ class CameraThread(QThread):
         self.square_centers: List[Tuple[np.ndarray, int]] = []
         self.square_center :List[Tuple] = []
         # 该元组用于存储每个方格的状态，0，1，2分别为无，黑，白
-        self.board_status : List[int] = []
+        self.board_status : List[int] = [0] * 9
 
         # 场外黑白棋的位置
         self.outside_black_chess_location : List[List[float]]= []
@@ -68,8 +68,14 @@ class CameraThread(QThread):
         # 系统的下一次落点
         self.move_index = -1
 
-        # 判断人机对弈有无结束
-        self.game_finished = False
+
+        # 计算像素信息的平均值，每计算一次像素值就+1
+        self.pixel_count = [0] * 9 
+
+        self.mean_lightness_arr = np.zeros((9,10),dtype=np.float32)
+        self.mean_g_arr = np.zeros((9,10),dtype=np.float32)
+
+        
         
         # 胜利条件：行或列或对角线有3个相同的棋子
         self.win_conditions = [
@@ -185,7 +191,7 @@ class CameraThread(QThread):
             # 4. 如果成功检测到棋盘，则检测棋盘上的棋子
             if board_info :
                 self.check_board(
-                    gray,
+                    obgr,
                     board_info['square_centers'],
                     board_info['square_radius']
                 )
@@ -194,18 +200,19 @@ class CameraThread(QThread):
                 board_corners = board_info['board_corners']
 
                 # 左上和右上如果水平上近似相等，就认为没有旋转
-                if abs(board_corners[0][0]-board[1][0]) <= config.HOR_DEVIATION :
+                if abs(board_corners[0][0]-board_corners[1][0]) <= config.HOR_DEVIATION :
                     globals.isrotate = False
                 # 左上和右下如果竖直上近似相等，就认为旋转
-                elif abs(board_corners[0][1]-board[2][1]) <= config.VER_DEVIATION :
+                elif abs(board_corners[0][1]-board_corners[2][1]) <= config.VER_DEVIATION :
                     globals.isrotate = True
 
-                print(f'isrotate : {globals.isrotate}')
+                # print(f'isrotate : {globals.isrotate}')
                 
                 # 如果用户已经下完棋子，那么系统开始规划下棋
 
                 # 更完美的做法是电机回到原点后发送数据，接收到该信号后检测是否有赢家
-                if globals.user_ready == True and self.game_finished == False:
+                if globals.user_ready == True and globals.game_finished == False:
+                    print(self.board_status)
                     # 5. 检查赢家，如果胜负未分就用算法规划下一步的落子
                     self.winner = self.check_winner(self.board_status)
                     
@@ -217,35 +224,35 @@ class CameraThread(QThread):
                         if globals.first_turn==1:
                             if self.pick_white_index:
                                 pick_index = self.pick_white_index.pop(0)
-                                print(f'white from {pick_index} to {self.move_index}\n')
+                                print(f'[INFO] white from {pick_index} to {self.move_index}\n')
                                 # self.ser.sendString(pick_index,self.move_index)
                                 # 重新等待用户
-                                globals.first_turn = False
+                                globals.user_ready = False
 
                         # 系统先手，取黑子
                         elif globals.first_turn==2:
                             if self.pick_black_index:
                                 pick_index = self.pick_black_index.pop(0)
-                                print(f'black from {pick_index} to {self.move_index}\n')
+                                print(f'[INFO] black from {pick_index} to {self.move_index}\n')
                                 # self.ser.sendString(pick_index,self.move_index)
                                 # 重新等待用户
-                                globals.first_turn = False
+                                globals.user_ready = False
 
 
                     elif self.winner != -1:
                         print("result has been sent!")
                         self.game_over_sign.emit(self.winner)
-                        self.game_finished = True
+                        globals.game_finished = True
 
 
                 # 如果save按键被按下，就保存当前棋盘状态
                 if globals.save_button_clicked == True:
-                    save_board_status = board_info['board_status']
+                    save_board_status = self.board_status
                     globals.save_button_clicked = False
 
                 # 作弊检测
                 if globals.start_cheat_detect == True:
-                    current_board_status = board_info['board_status']
+                    current_board_status = self.board_status
                     if save_board_status == current_board_status:
                         self.cheat_sign.emit(False)
                     else:
@@ -264,7 +271,7 @@ class CameraThread(QThread):
                                     cheat_end_idx = detect_difference[1-i]
                                     print(f'recover from {cheat_end_idx} to {cheat_start_idx}\n')
                                     # self.ser.sendString(cheat_end_idx,cheat_start_idx,is_cheat=True)
-
+                
 
 
             # 转为 QImage 并发射
@@ -315,7 +322,7 @@ class CameraThread(QThread):
         self.outside_black_chess_location = black_list
         self.outside_white_chess_location = white_list
         # 打印数量
-        print(f'outside has {len(black_list)} black chess, {len(white_list)} white chess')
+        # print(f'outside has {len(black_list)} black chess, {len(white_list)} white chess')
 
 
 
@@ -337,7 +344,7 @@ class CameraThread(QThread):
                     biggest_area = area
                     biggest = con
         
-        if biggest != []:
+        if len(biggest) != 0:
           
             # 使用最小外接矩形
             rect = cv2.minAreaRect(biggest)  # ((cx, cy), (w, h), angle)
@@ -362,7 +369,7 @@ class CameraThread(QThread):
                 bottom_right, bottom_left = bottom_points
 
 
-            print(f'top_left = {top_left}, top_right = {top_right}, bottom_right = {bottom_right}, bottom_left = {bottom_left}\n')
+            # print(f'top_left = {top_left}, top_right = {top_right}, bottom_right = {bottom_right}, bottom_left = {bottom_left}\n')
 
             # 再组合为有序四边形
             sorted_box = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
@@ -381,7 +388,7 @@ class CameraThread(QThread):
 
             # 单格内接圆半径
             self.square_radius = float(np.mean([self.board_width, self.board_height]) / 6.0)
-            print(f'square_radius = {self.square_radius}')
+            # print(f'square_radius = {self.square_radius}')
 
             # 棋盘角度（顺时针为负）
             delta = ((bottom_right - bottom_left)+(top_right - top_left)) / 2.0
@@ -432,29 +439,49 @@ class CameraThread(QThread):
         self.pick_white_index = random.sample(list(range(5,10)),5)
 
     # 识别每个方格内是否有棋子，状态分别是0，1，2
-    # 暂且先试试灰度图像的处理效果
-    def check_board(self, gray: np.ndarray, square_centers: List[Tuple[np.ndarray, int]], square_radius: float):
-        board_status = []
+    # 用3个通道判断
+    def check_board(self, bgr: np.ndarray, square_centers: List[Tuple[np.ndarray, int]], square_radius: float):
+        board_status = [3] * 9
         for _, (center, seq) in enumerate(square_centers):
             # 创建掩膜：一个和 gray 一样大小的全零矩阵
-            h, w = gray.shape
+            h, w= bgr.shape[:2]
             mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.circle(mask,(int(center[0]), int(center[1])),int(square_radius), 1, -1)
+            cv2.circle(mask,(int(center[0]), int(center[1])),int(square_radius), 255, -1)
 
             # 计算该圆内的平均灰度值
-            mean_val = cv2.mean(gray, mask=mask)[0]
+            mean_b = cv2.mean(bgr, mask=mask)[0]
+            mean_g = cv2.mean(bgr, mask=mask)[1]
+            mean_r = cv2.mean(bgr, mask=mask)[2]
+            mean_lightness = 0.114 * mean_b + 0.587 * mean_g + 0.299 * mean_r
+           
+            self.mean_lightness_arr[seq-1][self.pixel_count[seq-1]] = mean_lightness
+            self.mean_g_arr[seq-1][self.pixel_count[seq-1]] = mean_g
+            self.pixel_count[seq-1] += 1  # seq从1开始，所以seq-1
+            
 
-            if mean_val >= config.WHITE_CHESS_THRESH:
-                board_status.append(2)
-                print(f'格子 {seq} 是 白棋 (2)，平均灰度={mean_val:.2f}')
-            elif mean_val <= config.BLACK_CHESS_THRESH:
-                board_status.append(1)
-                print(f'格子 {seq} 是 黑棋 (1)，平均灰度={mean_val:.2f}')
-            else:
-                board_status.append(0)
-                print(f'格子 {seq} 是 无棋子 (0)，平均灰度={mean_val:.2f}')
-        # 更新实例属性
-        self.board_status = board_status
+           
+            # 每检测10次就进行一次判断
+            if self.pixel_count[seq-1] >= 10:
+                avarage_lightness = np.mean(self.mean_lightness_arr[seq-1])
+                avarage_g = np.mean(self.mean_g_arr[seq-1])
+                # print(f' seq {seq} avarage_lightness : {avarage_lightness:.2f}, avarage_g : {avarage_g:.2f}')
+                self.pixel_count[seq-1] = 0
+                # 如果亮度大于阈值，认为是白棋
+                if avarage_lightness >= config.SQUARE_LIGHTNESS_HIGH_THRESH and avarage_g >= config.SQUARE_GREEN_HIGH_THRESH:
+                    self.board_status[seq-1] = 2
+                    # print(f'seq {seq} is white chess (2)')
+
+                # 如果亮度小于阈值且g通道偏小，认为是黑棋
+                elif avarage_lightness <= config.SQUARE_LIGHTNESS_LOW_THRESH and avarage_g <= config.SQUARE_GREEN_LOW_THRESH:
+                    self.board_status[seq-1] = 1
+                    # print(f'seq {seq} is black chess (1)')
+
+                # 否则认为是空格
+                else:
+                    self.board_status[seq-1] = 0
+                    # print(f'seq {seq} is no chess (0)')
+
+  
 
 
 
@@ -648,6 +675,10 @@ class MainWindow(QMainWindow):
         globals.first_turn = 1
         # 系统执白棋，初始化取白棋的列表
         self.camera_thread.reset_board_status()
+
+        # 重新开始游戏
+        globals.game_finished = False
+
         target_window.show()
         self.hide()
 
@@ -657,6 +688,10 @@ class MainWindow(QMainWindow):
         # 系统先手
         globals.first_turn = 2
         self.camera_thread.reset_board_status()
+
+        # 重新开始游戏
+        globals.game_finished = False
+
         target_window.show()
         self.hide()
 
