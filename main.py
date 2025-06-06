@@ -74,6 +74,8 @@ class CameraThread(QThread):
 
         self.mean_lightness_arr = np.zeros((9,10),dtype=np.float32)
         self.mean_g_arr = np.zeros((9,10),dtype=np.float32)
+        self.mean_b_arr = np.zeros((9,10),dtype=np.float32)
+        self.mean_r_arr = np.zeros((9,10),dtype=np.float32)
 
         
         
@@ -441,7 +443,6 @@ class CameraThread(QThread):
     # 识别每个方格内是否有棋子，状态分别是0，1，2
     # 用3个通道判断
     def check_board(self, bgr: np.ndarray, square_centers: List[Tuple[np.ndarray, int]], square_radius: float):
-        board_status = [3] * 9
         for _, (center, seq) in enumerate(square_centers):
             # 创建掩膜：一个和 gray 一样大小的全零矩阵
             h, w= bgr.shape[:2]
@@ -456,6 +457,8 @@ class CameraThread(QThread):
            
             self.mean_lightness_arr[seq-1][self.pixel_count[seq-1]] = mean_lightness
             self.mean_g_arr[seq-1][self.pixel_count[seq-1]] = mean_g
+            self.mean_b_arr[seq-1][self.pixel_count[seq-1]] = mean_b
+            self.mean_r_arr[seq-1][self.pixel_count[seq-1]] = mean_r
             self.pixel_count[seq-1] += 1  # seq从1开始，所以seq-1
             
 
@@ -464,7 +467,9 @@ class CameraThread(QThread):
             if self.pixel_count[seq-1] >= 10:
                 avarage_lightness = np.mean(self.mean_lightness_arr[seq-1])
                 avarage_g = np.mean(self.mean_g_arr[seq-1])
-                # print(f' seq {seq} avarage_lightness : {avarage_lightness:.2f}, avarage_g : {avarage_g:.2f}')
+                avarage_b = np.mean(self.mean_b_arr[seq-1])
+                avarage_r = np.mean(self.mean_r_arr[seq-1])
+                # print(f' seq {seq} lightness : {avarage_lightness:.2f}, g : {avarage_g:.2f}, b : {avarage_b:.2f}, r : {avarage_r:.2f}')
                 self.pixel_count[seq-1] = 0
                 # 如果亮度大于阈值，认为是白棋
                 if avarage_lightness >= config.SQUARE_LIGHTNESS_HIGH_THRESH and avarage_g >= config.SQUARE_GREEN_HIGH_THRESH:
@@ -513,10 +518,10 @@ class CameraThread(QThread):
         score = 0
         for (a, b, c) in self.win_conditions:
             line = [board_status[a], board_status[b], board_status[c]]
-            # 如果这一条线我方占2个空一个，+5分
+            # 如果这一条线对方占2个空1个，-4分
             if line.count(globals.first_turn) == 2 and line.count(0) == 1:
                 score -= 4
-            # 如果这一条线对方占2个空一个，-4分
+            # 如果这一条线我方占2个空1个，+5分
             if line.count(3 - globals.first_turn) == 2 and line.count(0) == 1:
                 score += 5
 
@@ -528,11 +533,15 @@ class CameraThread(QThread):
     # 传入当前棋盘状态，深度，alpha，beta，是否是最大化玩家
     # 返回当前局面对自己的评分
     def minimax(self, board_status, depth, alpha, beta, is_maximizing):
-        score = self.evaluate(board_status)
-        if score == 10 or score == -10:
-            return score
-        if 0 not in board_status:
-            return 0
+        winner = self.check_winner(board_status)
+        if winner != -1:
+            if winner == globals.first_turn:
+                return -10 + depth  # 加depth是为了让AI优先选择较快的胜利或较晚的失败
+            elif winner == 3 - globals.first_turn:
+                return 10 - depth
+            else:  # 平局
+                return 0
+
 
         if is_maximizing:
             best = -float('inf')
