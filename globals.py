@@ -9,10 +9,6 @@ game_finished = False
 # 判断用户是否下完
 user_ready :bool = False
 
-# 判断save按键是否被按下
-save_button_clicked = False
-# 判断是否开启作弊检测
-start_cheat_detect = False
 
 # 判断棋盘是否旋转
 isrotate = False
