@@ -64,7 +64,7 @@ class CameraThread(QThread):
 
           # 场外黑白棋的随机序列
         self.pick_black_index: List[int] = random.sample(list(range(0,5)), 5)
-        self.pick_white_index: List[int] = random.sample(list(range(5,10)), 5)
+        self.pick_white_index: List[int] = random.sample(list(range(5,9)), 4)
 
 
          # 系统的下一次落点
@@ -143,6 +143,7 @@ class CameraThread(QThread):
                     board_info['square_radius']
                 )
 
+                '''
                 # 判断棋盘是否旋转
                 board_corners = board_info['board_corners']
 
@@ -154,41 +155,20 @@ class CameraThread(QThread):
                     globals.isrotate = True
 
                 # print(f'isrotate : {globals.isrotate}')
+                '''
 
 
                 # 如果用户已经下完棋子，那么系统开始规划下棋
 
-                # 更完美的做法是电机回到原点后发送数据，接收到该信号后检测是否有赢家
                 if globals.user_ready == True and globals.game_finished == False:
-                
-                    # 作弊检测
-                    print('last status:',self.save_board_status)
-                    print('current status:',self.board_status)
-                    if self.start_cheat_detect == True:
-                        # current_board_status = self.board_status
-                        if self.save_board_status == self.board_status:
-                            print('you are integrity!')
-                            self.cheat_sign.emit(False)
-                        else:
-                            print('you have cheated ! !')
-                            self.cheat_sign.emit(True)
-                            # 检测哪些区域发生改变
-                            detect_difference = [idx for idx,(current,save) in
-                                                enumerate(zip(self.board_status,self.save_board_status))
-                                                if current != save]
-
-                            if len(detect_difference)==2:
-                                for i in range(len(detect_difference)):
-                                    # 获取原先不为空且发生改变的区域,需要将棋子运回该方格
-                                    if self.save_board_status[i] != 0:
-                                        cheat_start_idx = detect_difference[i]
-                                        cheat_end_idx = detect_difference[1-i]
-                                        print(f'recover from {cheat_end_idx} to {cheat_start_idx}\n')
-                                        # self.ser.sendString(cheat_end_idx,cheat_start_idx,is_cheat=True)
+                    cheat_found = False                  
+                            
                     print(self.board_status)
+
+                    
                     # 5. 检查赢家，如果胜负未分就用算法规划下一步的落子
                     self.winner = self.check_winner(self.board_status)
-                    
+                        
                     if self.winner == -1:
                         print("game is not over yet!")
                         self.move_index = self.find_best_move(self.board_status)
@@ -215,7 +195,41 @@ class CameraThread(QThread):
                     elif self.winner != -1:
                         print("result has been sent!")
                         self.game_over_sign.emit(self.winner)
-                        globals.game_finished = True            
+                        globals.game_finished = True        
+
+
+
+                    # 作弊检测
+                    if self.start_cheat_detect and not self.cheat_already_handled:
+                        print('you have cheated!')
+                        self.start_cheat_detect = False      # 只检测这一次
+                        self.cheat_already_handled = True    # 防止重复触发
+
+                        if self.save_board_status != self.board_status:
+                            cheat_found = True
+                            self.cheat_sign.emit(True)
+                            print('[CHEAT] last:', self.save_board_status)
+                            print('[CHEAT] curr:', self.board_status)
+
+                            # 找到棋子被移动的起止位置
+                            cheat_start_idx = -1
+                            cheat_end_idx   = -1
+                            for idx, (curr, prev) in enumerate(zip(self.board_status,
+                                                                self.save_board_status)):
+                                if prev != 0 and curr == 0:
+                                    cheat_start_idx = idx
+                                elif prev == 0 and curr != 0:
+                                    cheat_end_idx = idx
+
+                            if cheat_start_idx != -1 and cheat_end_idx != -1:
+                                print(f'recover from {cheat_end_idx} to {cheat_start_idx}')
+                                # self.ser.sendString(cheat_end_idx,cheat_start_idx,s_cheat=True)
+
+                        else:
+                            # 没作弊
+                            self.cheat_sign.emit(False)
+                            print('you are integrity!')
+
 
 
             # 转为 QImage 并发射
@@ -265,7 +279,7 @@ class CameraThread(QThread):
 
 
 
-    # 异步协程：检测棋盘（中间区域），找到最大的四边形轮廓，计算出棋盘参数并返回
+    # 在图像左右侧检测，如果外界矩形近似于正方形且边长在一定范围内,就认为检测到圆形
     # 返回值是字典类型，分别是小方格中心坐标，小方格半径，棋盘4个角点
     def detect_board(self, edges: np.ndarray, left_edge: int, right_edge: int, frame: np.ndarray):
         mask = np.zeros_like(edges)
@@ -366,16 +380,9 @@ class CameraThread(QThread):
                     'board_corners': (top_left, top_right, bottom_right, bottom_left)
             }
             return result
-
-
-    # 重置棋盘状态
-    def reset_board_status(self):
-        self.pick_black_index = random.sample(list(range(5)),5)
-        self.pick_white_index = random.sample(list(range(5,10)),5)
-        self.board_status = [0] * 9
-
+        
+    
     # 识别每个方格内是否有棋子，状态分别是0，1，2
-    # 暂且先试试灰度图像的处理效果
     def check_board(self, bgr: np.ndarray, square_centers: List[Tuple[np.ndarray, int]], square_radius: float):
         
         for seq , center in enumerate(square_centers):
@@ -407,13 +414,15 @@ class CameraThread(QThread):
                     avarage_r = np.mean(self.mean_r_arr[seq])
                     # print(f' seq {seq} lightness : {avarage_lightness:.2f}, g : {avarage_g:.2f}, b : {avarage_b:.2f}, r : {avarage_r:.2f}')
                     self.pixel_count[seq] = 0
-                    # 如果亮度大于阈值，认为是白棋
-                    if avarage_r >= config.SQUARE_RED_HIGH_THRESH and avarage_g >= config.SQUARE_GREEN_HIGH_THRESH:
+                    
+                    # 如果g通道大于阈值，且g通道和r通道的差值较小，就认为时白棋
+                    # 这是因为白棋和空格的亮度。g通道的值都比较高，但是空格时绿色，r通道明显小于g通道
+                    if avarage_g >= config.SQUARE_GREEN_HIGH_THRESH and (avarage_g - avarage_r)<=config.SQUARE_G_DIFF_R_THRESH:
                         self.board_status[seq] = 2
                         # print(f'seq {seq} is white chess (2)')
 
-                    # 如果亮度小于阈值且g通道偏小，认为是黑棋
-                    elif avarage_r <= config.SQUARE_RED_LOW_THRESH and avarage_g <= config.SQUARE_GREEN_LOW_THRESH:
+                    # 如果g通道偏小，认为时黑棋
+                    elif avarage_g <= config.SQUARE_GREEN_LOW_THRESH :
                         self.board_status[seq] = 1
                         # print(f'seq {seq} is black chess (1)')
 
@@ -421,6 +430,15 @@ class CameraThread(QThread):
                     else:
                         self.board_status[seq] = 0
                         # print(f'seq {seq} is no chess (0)')
+
+
+    # 重置棋盘状态
+    def reset_board_status(self):
+        self.pick_black_index = random.sample(list(range(5)),5)
+        self.pick_white_index = random.sample(list(range(5,9)),4)
+        self.board_status = [0] * 9
+
+    
 
 
     # 检查赢家
@@ -524,11 +542,14 @@ class CameraThread(QThread):
 
 
     @pyqtSlot()
+    # 处理qt进程发送的信号，保存棋盘的状态
     def on_save_board(self):
         self.save_board_status = self.board_status.copy()
         print('board_status has been saved! ', self.save_board_status)
 
+
     @pyqtSlot(bool)
+    # 处理qt进程发送的信号，开启作弊检测
     def on_cheat_detect_status(self, status):
         self.start_cheat_detect = status
 
@@ -720,19 +741,25 @@ class DeployPage(BaseFunctionWindow):
         self.white_button.clicked.connect(self.on_white_clicked)
         right_layout.addWidget(self.white_button, alignment=Qt.AlignTop)
 
-        # 2.3 Deploy 按钮
+        # 2.3 Rotate 按钮
+        self.rotate_button = QPushButton("Rotate")
+        self.rotate_button.setFixedSize(100, 40)
+        self.rotate_button.clicked.connect(self.on_rotate_clicked)
+        right_layout.addWidget(self.rotate_button, alignment=Qt.AlignTop)
+
+        # 2.4 Deploy 按钮
         self.deploy_button = QPushButton("Deploy")
         self.deploy_button.setFixedSize(100, 40)
         self.deploy_button.clicked.connect(self.on_deploy_clicked)
         right_layout.addWidget(self.deploy_button, alignment=Qt.AlignTop)
 
-        # 2.4 Reset 按钮
+        # 2.5 Reset 按钮
         self.reset_button = QPushButton("Reset")
         self.reset_button.setFixedSize(100, 40)
         self.reset_button.clicked.connect(self.on_reset_clicked)
         right_layout.addWidget(self.reset_button, alignment=Qt.AlignTop)
 
-        # 2.5 Back 按钮（继承自 BaseFunctionWindow）
+        # 2.6 Back 按钮（继承自 BaseFunctionWindow）
         #    BaseFunctionWindow 已经创建了 self.back_button 并连接 return_to_main_window()
         self.back_button.setText("Back")
         self.back_button.setFixedSize(100, 40)
@@ -816,6 +843,27 @@ class DeployPage(BaseFunctionWindow):
                 btn.setEnabled(True)
         self.clear_mode_selection()
 
+
+    def on_rotate_clicked(self):
+        """
+        点击 Rotate 按钮：
+        - 第一次点击进入旋转模式：globals.isrotate = True，按钮变灰
+        - 再次点击取消旋转模式：globals.isrotate = False，按钮恢复
+        """
+        # 切换状态
+        globals.isrotate = not globals.isrotate
+
+        if globals.isrotate:
+            self.rotate_button.setStyleSheet("background-color: lightgray;")
+            self.rotate_button.setText("Rotated")
+            print("Rotate mode enabled — globals.isrotate = True")
+        else:
+            self.rotate_button.setStyleSheet("")
+            self.rotate_button.setText("Rotate")
+            print("Rotate mode disabled — globals.isrotate = False")
+
+
+
      # 通过串口把黑白棋落点(序号)发送出去
     def on_deploy_clicked(self):
 
@@ -836,23 +884,9 @@ class DeployPage(BaseFunctionWindow):
 
         # 从 [0,1,2,3,4] 中随机取不重复编号用于“取子编号”
         pick_black_src = random.sample(range(5), count_black_chess)
-        pick_white_src = random.sample(range(5), count_white_chess)
+        pick_white_src = random.sample(range(5,9), count_white_chess)
 
-        # black_messages: List[str] = [
-        #     f"from {src} to {dst}\n" for src, dst in zip(pick_black_src, black_idx)
-        # ]
-        # white_messages: List[str] = [
-        #     f"from {src} to {dst}\n" for src, dst in zip(pick_white_src, white_idx)
-        # ]
-
-        # # 串口发送
-        # for msg in black_messages:
-        #     print(f"发送黑棋指令: {msg.strip()}")
-        #     # self.ser.ser.write(msg.encode())
-        #
-        # for msg in white_messages:
-        #     print(f"发送白棋指令: {msg.strip()}")
-        #     # self.ser.ser.write(msg.encode())
+  
 
 
         # 发送坐标序号
@@ -1034,13 +1068,13 @@ class SerialInit:
         # if self.ser.is_open:
         #     if not is_cheat:
         #         if globals.isrotate:
-        #             format_string = f'deploy from {dst} to {src}\n'
+        #             format_string = f'deploy from {dst} to {src},0,0\n'
         #             self.ser.write(format_string.encode())
         #         else:
-        #             format_string = f'isrotate from {dst} to {src}\n'
+        #             format_string = f'isrotate from {dst} to {src},1,0\n'
         #             self.ser.write(format_string.encode())
         #     else:
-        #         format_string = f'recover from {dst} to {src}\n'
+        #         format_string = f'recover from {dst} to {src},0,1\n'
         #         self.ser.write(format_string.encode())
         # else:
         #     print("Serial port is not open!")
